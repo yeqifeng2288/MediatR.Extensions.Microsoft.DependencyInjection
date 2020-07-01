@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using MediatR.Extensions.Microsoft.DependencyInjection;
 using MediatR.Pipeline;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -59,8 +60,15 @@ namespace MediatR.Registration
             IEnumerable<Assembly> assembliesToScan,
             bool addIfAlreadyExists)
         {
+            // 这个集合收集中保存的是处理者。
             var concretions = new List<Type>();
+
+            // 新增一个用于收集排序的集合。
+            var concretionsOrder = new List<Type>();
+
+            // 这个集合保存的是处理者的接口。
             var interfaces = new List<Type>();
+
             foreach (var type in assembliesToScan.SelectMany(a => a.DefinedTypes).Where(t => !t.IsOpenGeneric()))
             {
                 var interfaceTypes = type.FindInterfacesThatClose(openRequestInterface).ToArray();
@@ -68,7 +76,11 @@ namespace MediatR.Registration
 
                 if (type.IsConcrete())
                 {
-                    concretions.Add(type);
+                    // 分离。
+                    if (type.GetCustomAttributes().Any(o => o.GetType().Equals(typeof(EventOrderAttribute))))
+                        concretionsOrder.Add(type);
+                    else
+                        concretions.Add(type);
                 }
 
                 foreach (var interfaceType in interfaceTypes)
@@ -77,32 +89,51 @@ namespace MediatR.Registration
                 }
             }
 
-            foreach (var @interface in interfaces)
+            // 排序后加入到服务中。
+            concretionsOrder = OrderService(concretionsOrder);
+            AddService(concretions);
+            AddService(concretionsOrder);
+
+            // 排序服务。
+            List<Type> OrderService(List<Type> concretions)
             {
-                var exactMatches = concretions.Where(x => x.CanBeCastTo(@interface)).ToList();
-                if (addIfAlreadyExists)
-                {
-                    foreach (var type in exactMatches)
-                    {
-                        services.AddTransient(@interface, type);
-                    }
-                }
+                if (concretions.Any())
+                    return concretions.OrderBy(o => o.GetCustomAttribute<EventOrderAttribute>().Order).ToList();
                 else
+                    return concretions;
+            }
+
+            // 添加服务。
+            void AddService(List<Type> concretions)
+            {
+                // 这一部分是将接口与相应的实例者相匹配，然后注册到容器中。
+                foreach (var @interface in interfaces)
                 {
-                    if (exactMatches.Count > 1)
+                    var exactMatches = concretions.Where(x => x.CanBeCastTo(@interface)).ToList();
+                    if (addIfAlreadyExists)
                     {
-                        exactMatches.RemoveAll(m => !IsMatchingWithInterface(m, @interface));
+                        foreach (var type in exactMatches)
+                        {
+                            services.AddTransient(@interface, type);
+                        }
+                    }
+                    else
+                    {
+                        if (exactMatches.Count > 1)
+                        {
+                            exactMatches.RemoveAll(m => !IsMatchingWithInterface(m, @interface));
+                        }
+
+                        foreach (var type in exactMatches)
+                        {
+                            services.TryAddTransient(@interface, type);
+                        }
                     }
 
-                    foreach (var type in exactMatches)
+                    if (!@interface.IsOpenGeneric())
                     {
-                        services.TryAddTransient(@interface, type);
+                        AddConcretionsThatCouldBeClosed(@interface, concretions, services);
                     }
-                }
-
-                if (!@interface.IsOpenGeneric())
-                {
-                    AddConcretionsThatCouldBeClosed(@interface, concretions, services);
                 }
             }
         }
